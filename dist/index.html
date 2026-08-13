@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DeepSeek Harness</title>
+    <style>
+      :root { color-scheme: dark; }
+      html, body { height: 100%; margin: 0; }
+      body {
+        display: grid; place-items: center;
+        background: #0b0f1a; color: #cbd5e1;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      }
+      .spinner {
+        width: 36px; height: 36px;
+        border: 3px solid #1e293b; border-top-color: #4d7cfe;
+        border-radius: 50%; animation: spin 0.9s linear infinite; margin: 0 auto 16px;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      .box { text-align: center; }
+      h1 { font-size: 16px; font-weight: 600; margin: 0 0 4px; color: #e2e8f0; }
+      p { font-size: 13px; margin: 0; color: #64748b; }
+    </style>
+  </head>
+  <body>
+    <div class="box">
+      <div class="spinner"></div>
+      <h1>DeepSeek Harness</h1>
+      <p id="status">Starting local server…</p>
+    </div>
+    <script>
+      (function () {
+        var navigated = false;
+        var failed = false;
+        function go(url) {
+          if (!url || navigated) return;
+          // Only accept the canonical loopback origin the sidecar owns.
+          if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(url)) return;
+          navigated = true;
+          window.location.replace(url);
+        }
+        function status(text) {
+          var el = document.getElementById('status');
+          if (el) el.textContent = text;
+        }
+        if (window.__TAURI__ && window.__TAURI__.event) {
+          // Primary path: the Rust host emits this once the sidecar binds.
+          window.__TAURI__.event.listen('sidecar-ready', function (e) {
+            go(e && e.payload && e.payload.url);
+          });
+          // Runtime bootstrap progress (first-launch download/extract/errors).
+          window.__TAURI__.event.listen('runtime-progress', function (e) {
+            var p = e && e.payload;
+            if (!p) return;
+            if (p.message) status(p.message);
+            if (p.phase === 'error') failed = true;
+          });
+        }
+        // Fallback: poll a host command in case the event fired before we loaded.
+        var attempts = 0;
+        function poll() {
+          if (navigated || failed) return;
+          attempts += 1;
+          if (attempts > 120) { status('Could not reach the DeepSeek Harness server.'); return; }
+          var p = window.__TAURI__ && window.__TAURI__.core
+            ? window.__TAURI__.core.invoke('get_sidecar_url')
+            : Promise.resolve(null);
+          Promise.resolve(p).then(function (url) {
+            if (url) { go(url); return; }
+            setTimeout(poll, 250);
+          }).catch(function () {
+            setTimeout(poll, 250);
+          });
+        }
+        poll();
+      })();
+    </script>
+  </body>
+</html>

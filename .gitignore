@@ -1,0 +1,53 @@
+# ---- Node ----
+node_modules/
+.pnpm-store/
+
+# ---- Local Rust toolchain (installed into the workspace) ----
+.cargo/
+.rustup/
+
+# ---- Tauri / Rust build output ----
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# ---- Sidecar build output (produced by scripts/build-sidecar.mjs) ----
+src-tauri/binaries/
+src-tauri/resources/node-app/
+src-tauri/runtime-manifest.json
+
+# ---- Logs ----
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ---- Environment / secrets (never commit) ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
+*_rsa
+*_ed25519
+
+# ---- Editor / IDE ----
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ---- OS junk ----
+.DS_Store
+.DS_Store?
+Thumbs.db
+desktop.ini
