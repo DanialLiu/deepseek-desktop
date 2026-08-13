@@ -13,6 +13,7 @@ src-tauri/gen/schemas/
 # ---- Sidecar build output (produced by scripts/build-sidecar.mjs) ----
 src-tauri/binaries/
 src-tauri/resources/node-app/
+src-tauri/resources/node-app-runtime.tar.gz
 src-tauri/runtime-manifest.json
 
 # ---- Logs ----

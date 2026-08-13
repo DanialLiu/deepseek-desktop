@@ -8,7 +8,7 @@ deepseek-desktop 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-
 
 Harness 是一个 Node.js 宿主程序，通过回环 HTTP 服务器（`dsh web`）对外提供浏览器界面。本项目把这个宿主程序包装进原生桌面窗口：Tauri（Rust）外壳以 **sidecar**（应用内置的官方 Node 二进制）方式启动 harness，等待它就绪后的 URL，然后把 webview 指向 `http://127.0.0.1:<port>`。
 
-harness 的依赖闭包**不会**打包进应用内。它以独立的 `node-app-<triple>.tar.gz` 形式发布，并在首次启动时下载、校验、解压（见[运行时下载](#运行时下载)）。装好应用即装好一切——运行时无需系统级 Node、pnpm 或 Python。
+harness 的依赖闭包以**单个 `node-app-runtime.tar.gz` 资源**打包进应用内（而非 3 万个松散文件），首次启动时本地校验、解压（见[内置运行时](#内置运行时)）。装好应用即装好一切——运行时无需系统级 Node、pnpm 或 Python，也无需任何网络下载。
 
 ### 架构
 
@@ -22,16 +22,18 @@ deepseek-desktop/
 ├── src-tauri/
 │   ├── src/main.rs                     # 调用 deepseek_desktop_lib::run()
 │   ├── src/lib.rs                      # 确保运行时、启动 sidecar、解析 URL 行
-│   ├── src/runtime.rs                  # 首次启动时下载 / sha256 校验 / 解压闭包
-│   ├── runtime-manifest.json           # {version, url, sha256}，编译期内置（构建产物）
-│   ├── tauri.conf.json                 # externalBin = binaries/node
+│   ├── src/runtime.rs                  # 首次启动时 sha256 校验 / 解压内置闭包
+│   ├── runtime-manifest.json           # {version, sha256}，编译期内置（构建产物）
+│   ├── tauri.conf.json                 # externalBin = binaries/node + 内置 resources
+│   ├── resources/
+│   │   └── node-app-runtime.tar.gz     # 内置的 harness 闭包（构建产物，随 .app 发布）
 │   └── binaries/
 │       ├── node-<triple>               # 内置 Node sidecar（构建产物）
-│       └── node-app-<triple>.tar.gz    # 首次启动下载用的 harness 闭包（构建产物）
+│       └── node-app-<triple>.tar.gz    # 打包源文件（复制进 resources 后随包发布）
 └── dist/index.html                     # 加载页；就绪后跳转到 sidecar URL
 ```
 
-> 当前布局中 `src-tauri/resources/` 有意留空。早期版本曾把 harness 闭包打包在那里；现在改为以可下载 tarball 形式发布。
+> `src-tauri/resources/node-app-runtime.tar.gz` 是内置运行时；构建时由 `build-sidecar.mjs` 从 `binaries/` 复制而来。历史版本曾改为「首次启动下载」，现已回到内置方案以保证离线可用。
 
 ### 为什么用「node 载体」（而非单个 pkg --sea exe）
 
@@ -39,27 +41,19 @@ Harness 的 `web` profile 构建在一套 **profile 系统**之上：运行时�
 
 可靠的路线——也正是 `dsh web` 在生产环境的实际运行方式——是在磁盘上同时提供扁平的依赖闭包和官方 Node 二进制。`build-sidecar.mjs` 通过 Harness 自带的 `pnpm deploy --legacy` 路由（外加一个工作区闭包补齐步骤，补上 legacy deploy 会丢弃的传递 `workspace:` 包）生成该闭包。
 
-### 运行时下载
+### 内置运行时
 
-harness 闭包（约 3 万个文件）太大、太脆弱，不适合打进 `.app`，所以外壳在首次启动时拉取它：
+harness 闭包（约 3 万个文件）若以散文件打进 `.app`，会因文件过多让签名/打包变脆弱，所以把它打成**单个 tarball 资源**内置进应用，首次启动本地解压，完全离线、无网络依赖：
 
-1. `build-sidecar.mjs` 把暂存的闭包打包为 `binaries/node-app-<triple>.tar.gz`（顶层目录 `node-app`），并写入 `src-tauri/runtime-manifest.json`：
+1. `build-sidecar.mjs` 把暂存的闭包打包为 `binaries/node-app-<triple>.tar.gz`（顶层目录 `node-app`），复制为 `src-tauri/resources/node-app-runtime.tar.gz`，并写入 `src-tauri/runtime-manifest.json`：
    ```json
    {
-     "version": "0.1.0",
-     "url": "https://your-cdn.example.com/deepseek-desktop/node-app-aarch64-apple-darwin.tar.gz",
-     "sha256": "…"
+     "version": "0.1.0-rc.5",
+     "sha256": "3d455dfb…"
    }
    ```
-2. `runtime.rs` 通过 `include_str!` 把这个 manifest 内置进二进制。
-3. 首次启动时 `ensure_runtime()` 把 `url` 下载到 `<app-data>/runtime/`，校验 SHA-256，解压到 `<app-data>/runtime/node-app`，并写入 `.installed` 版本标记。版本升级会重新下载；版本不变则复用。
-
-下载 URL 来自 sidecar 构建时的 `RUNTIME_BASE_URL`（见[构建](#构建)）。本地测试可以直接托管 `binaries/` 目录：
-
-```bash
-cd src-tauri/binaries && python3 -m http.server 8000
-RUNTIME_BASE_URL=http://127.0.0.1:8000 pnpm run sidecar
-```
+2. `runtime.rs` 通过 `include_str!` 把这个 manifest 内置进二进制；`tauri.conf.json` 的 `bundle.resources` 把该 tarball 一并打进 `.app` 的 Resources 目录。
+3. 首次启动时 `ensure_runtime()` 从应用资源目录读取该 tarball，校验 SHA-256，解压到 `<app-data>/runtime/node-app`，并写入 `.installed` 版本标记。版本升级会重新解压；版本不变则直接复用。整个过程不联网，也不依赖任何本地端口或外部托管。
 
 ### 版本同步
 
@@ -69,7 +63,7 @@ RUNTIME_BASE_URL=http://127.0.0.1:8000 pnpm run sidecar
 
 1. 从暂存树读取已部署的 `@deepseek-ai/dsh` 版本；
 2. 把它写入 `package.json`、`src-tauri/tauri.conf.json` 和 `src-tauri/Cargo.toml`；
-3. 记录到 `runtime-manifest.json`（运行时的下载/版本标记，默认取 harness 版本；`RUNTIME_VERSION` 可覆盖以强制重新下载）。
+3. 记录到 `runtime-manifest.json`（运行时的校验/版本标记，默认取 harness 版本；`RUNTIME_VERSION` 可覆盖以强制重新解压）。
 
 随后 `tauri build` 从 `tauri.conf.json` 读取版本，因此产出的 `.app`/`.dmg` 会报告 harness 版本（例如 `CFBundleShortVersionString`），而 `make-dmg.sh` 会从已构建应用的 `CFBundleShortVersionString` 推导 `.dmg` 文件名。结果：只需升级 harness 子模块并重新构建，即可让所有版本字段保持同步。
 
@@ -107,17 +101,16 @@ pnpm run make-dmg                          # 仅 macOS：由 .app 制作 .dmg
 node scripts/build-sidecar.mjs --targets=macos-arm64,linux-x64   # 默认宿主平台
 HARNESS=/path/to/deepseek-harness node scripts/build-sidecar.mjs --skip-build
 
-# 发布时把真实下载 URL 写入 runtime-manifest.json。
-# （版本默认自动取 harness 版本；RUNTIME_VERSION 仅用于在应用版本之外强制运行时重新下载。）
-RUNTIME_BASE_URL=https://your-cdn.example.com/deepseek-desktop \
-  pnpm run sidecar
+# RUNTIME_BASE_URL 可选，仅用于未来的「动态下载」路径；
+# 内置方案无需设置它（版本默认自动取 harness 版本）。
+node scripts/build-sidecar.mjs --targets=macos-arm64
 ```
 
 其他参数：`--no-strip`（不裁剪 node 二进制）、`--dry-run`（只打印命令不执行）、`--help`。
 
 ### 外壳工作流程
 
-1. `lib.rs` 调用 `ensure_runtime()`——首次启动（或版本升级）时下载、校验、解压 harness 闭包，并通过 `runtime-progress` 事件向加载页上报进度。
+1. `lib.rs` 调用 `ensure_runtime()`——首次启动（或版本升级）时从内置资源校验、解压 harness 闭包，并通过 `runtime-progress` 事件向加载页上报进度。
 2. 随后以该闭包启动内置 Node sidecar：
    `node <app-data>/runtime/node-app/lib/bin.js --profile web --host 127.0.0.1 --port 0`，
    并把 `DSH_HOME` 指向系统应用数据目录（`<app-data>/dsh`）。
@@ -134,7 +127,7 @@ RUNTIME_BASE_URL=https://your-cdn.example.com/deepseek-desktop \
 - DMG 使用标准的「拖拽安装」布局：`make-dmg.sh` 挂载可写暂存镜像，在应用旁添加一个 `Applications -> /Applications` 符号链接。自定义卷图标通过写入 `.VolumeIcon.icns` 并执行 `SetFile -a C` 内置；该文件随后被标记为隐藏（`chflags hidden`），以免弄乱窗口。
 - macOS 上 `node-pty` 需要 `-spawn-helper` 同级文件（terminal/bash 工具用到）。harness 自带的安装会构建它；打包前请确保 `node_modules/node-pty` 已就绪（`pnpm deploy` 的 postinstall 会处理）。
 - 首次运行状态（`$DSH_HOME`）默认在系统应用数据目录；harness 会在首次启动时创建其 `profiles/` 树。
-- `runtime-manifest.json` 的 URL 必须公网可达才能用于分发构建。未设置 `RUNTIME_BASE_URL` 时会写入占位符——应用首次启动下载会失败，直到内置真实 URL。
+- `runtime-manifest.json` 不再包含下载 URL；运行时闭包以内置资源随 `.app` 分发，因此分发构建无需任何公网托管。
 - 发布分发需要代码签名 / 公证（macOS hardened runtime + notarytool、Windows 代码签名证书）——本地构建不在范围内。当同步到 `0.1.0-rc.5` 这类预发布 harness 版本时，macOS 的 `CFBundleVersion` 会原样继承（含 `-rc.5` 后缀）；App Store 提交要求纯数字构建号，该场景下请设置 `bundle.macOS.bundleVersion`。本地未公证构建不受影响。
 
 ---
@@ -150,10 +143,11 @@ Tauri (Rust) shell spawns the harness as a **sidecar** (the official Node binary
 bundled inside the app), waits for its readiness URL, then points the webview at
 `http://127.0.0.1:<port>`.
 
-The harness dependency closure is **not** bundled inside the app. It ships as a
-separate `node-app-<triple>.tar.gz` and is downloaded, verified and extracted on
-first launch (see [Runtime download](#runtime-download)). Installing the app
-installs everything — no system Node, pnpm, or Python is required at runtime.
+The harness dependency closure ships as a **single `node-app-runtime.tar.gz`
+resource** bundled inside the app (rather than 30k loose files), verified and
+extracted on first launch (see [Bundled runtime](#bundled-runtime)). Installing
+the app installs everything — no system Node, pnpm, or Python is required at
+runtime, and no network download is needed.
 
 ## Architecture
 
@@ -167,18 +161,21 @@ deepseek-desktop/
 ├── src-tauri/
 │   ├── src/main.rs                     # calls deepseek_desktop_lib::run()
 │   ├── src/lib.rs                      # ensures the runtime, spawns the sidecar, parses the URL line
-│   ├── src/runtime.rs                  # download / sha256-verify / extract the closure on first launch
-│   ├── runtime-manifest.json           # {version, url, sha256} baked in at compile time (build output)
-│   ├── tauri.conf.json                 # externalBin = binaries/node
+│   ├── src/runtime.rs                  # sha256-verify / extract the bundled closure on first launch
+│   ├── runtime-manifest.json           # {version, sha256} baked in at compile time (build output)
+│   ├── tauri.conf.json                 # externalBin = binaries/node + bundled resources
+│   ├── resources/
+│   │   └── node-app-runtime.tar.gz     # bundled harness closure (build output, ships in the .app)
 │   └── binaries/
 │       ├── node-<triple>               # bundled Node sidecar (build output)
-│       └── node-app-<triple>.tar.gz    # harness closure for first-launch download (build output)
+│       └── node-app-<triple>.tar.gz    # packaging source (copied into resources)
 └── dist/index.html                     # loading page; navigates to the sidecar URL once ready
 ```
 
-> `src-tauri/resources/` is intentionally empty in the current layout. Earlier
-> revisions bundled the harness closure there; it now ships as a downloadable
-> tarball instead.
+> `src-tauri/resources/node-app-runtime.tar.gz` is the bundled runtime;
+> `build-sidecar.mjs` copies it there from `binaries/` at build time. Earlier
+> revisions shipped it as a first-launch download; it is bundled again for a
+> fully offline first launch.
 
 ### Why a "node carrier" (not a single pkg --sea exe)
 
@@ -197,34 +194,31 @@ the flat dependency closure plus the official Node binary on disk. The
 `pnpm deploy --legacy` route (plus a workspace-closure completion pass for
 transitive `workspace:` packages that legacy deploy drops).
 
-## Runtime download
+## Bundled runtime
 
-The harness closure (30k files) is too large and fragile to bundle inside the
-`.app`, so the shell fetches it on first launch:
+The harness closure (30k files) would make signing/packaging fragile if shipped
+as loose files inside the `.app`, so it is packed into a **single tarball
+resource** bundled in the app and extracted on first launch — fully offline, no
+network dependency:
 
 1. `build-sidecar.mjs` packages the staged closure as
-   `binaries/node-app-<triple>.tar.gz` (top-level dir `node-app`) and writes
+   `binaries/node-app-<triple>.tar.gz` (top-level dir `node-app`), copies it to
+   `src-tauri/resources/node-app-runtime.tar.gz`, and writes
    `src-tauri/runtime-manifest.json`:
    ```json
    {
-     "version": "0.1.0",
-     "url": "https://your-cdn.example.com/deepseek-desktop/node-app-aarch64-apple-darwin.tar.gz",
-     "sha256": "…"
+     "version": "0.1.0-rc.5",
+     "sha256": "3d455dfb…"
    }
    ```
-2. `runtime.rs` bakes that manifest into the binary (`include_str!`).
-3. On first launch `ensure_runtime()` downloads `url` into
-   `<app-data>/runtime/`, verifies the SHA-256, extracts to
-   `<app-data>/runtime/node-app`, and writes a `.installed` version marker.
-   A version bump re-downloads; an unchanged version is reused.
-
-The download URL comes from `RUNTIME_BASE_URL` at sidecar-build time (see
-[Build](#build)). For local testing you can serve the `binaries/` directory:
-
-```bash
-cd src-tauri/binaries && python3 -m http.server 8000
-RUNTIME_BASE_URL=http://127.0.0.1:8000 pnpm run sidecar
-```
+2. `runtime.rs` bakes that manifest into the binary (`include_str!`), and
+   `tauri.conf.json`'s `bundle.resources` ships the tarball inside the `.app`'s
+   Resources directory.
+3. On first launch `ensure_runtime()` reads that tarball from the app's resource
+   directory, verifies the SHA-256, extracts to `<app-data>/runtime/node-app`,
+   and writes a `.installed` version marker. A version bump re-extracts; an
+   unchanged version is reused. Nothing is downloaded, so no local port or
+   external hosting is involved.
 
 ## Version sync
 
@@ -237,9 +231,9 @@ On every `pnpm run sidecar`, `build-sidecar.mjs`:
 1. reads the deployed `@deepseek-ai/dsh` version from the staging tree;
 2. writes it to `package.json`, `src-tauri/tauri.conf.json` and
    `src-tauri/Cargo.toml`;
-3. records it in `runtime-manifest.json` (the runtime's download/version marker,
+3. records it in `runtime-manifest.json` (the runtime's verify/version marker,
    defaulting to the harness version; `RUNTIME_VERSION` can override it to force
-   a re-download).
+   a re-extract).
 
 `tauri build` then reads the version from `tauri.conf.json`, so the shipped
 `.app`/`.dmg` reports the harness version (e.g. `CFBundleShortVersionString`),
@@ -283,11 +277,9 @@ pnpm run make-dmg                          # macOS only: .dmg from the .app
 node scripts/build-sidecar.mjs --targets=macos-arm64,linux-x64   # host platform by default
 HARNESS=/path/to/deepseek-harness node scripts/build-sidecar.mjs --skip-build
 
-# Bake a real download URL into runtime-manifest.json at release time.
-# (The version defaults to the harness version automatically; RUNTIME_VERSION
-#  is only for forcing a runtime re-download independently of the app version.)
-RUNTIME_BASE_URL=https://your-cdn.example.com/deepseek-desktop \
-  pnpm run sidecar
+# RUNTIME_BASE_URL is optional and only used for a future dynamic-download path;
+# the bundled layout needs no URL (the version defaults to the harness version).
+node scripts/build-sidecar.mjs --targets=macos-arm64
 ```
 
 Other flags: `--no-strip` (ship the node binary unstripped), `--dry-run`
@@ -295,9 +287,9 @@ Other flags: `--no-strip` (ship the node binary unstripped), `--dry-run`
 
 ## How the shell works
 
-1. `lib.rs` calls `ensure_runtime()` — downloads, verifies and extracts the
-   harness closure on first launch (or on a version bump), reporting progress to
-   the loading page via `runtime-progress` events.
+1. `lib.rs` calls `ensure_runtime()` — verifies and extracts the bundled harness
+   closure on first launch (or on a version bump), reporting progress to the
+   loading page via `runtime-progress` events.
 2. It then spawns the bundled Node sidecar against that closure:
    `node <app-data>/runtime/node-app/lib/bin.js --profile web --host 127.0.0.1 --port 0`,
    with `DSH_HOME` pointed at the OS app-data directory (`<app-data>/dsh`).
@@ -332,9 +324,8 @@ Other flags: `--no-strip` (ship the node binary unstripped), `--dry-run`
   is populated before packaging (the `pnpm deploy` postinstall handles it).
 - First-run state (`$DSH_HOME`) defaults to the OS app-data directory; the
   harness creates its `profiles/` tree there on first launch.
-- The `runtime-manifest.json` URL must be publicly reachable for distributed
-  builds. A placeholder is written when `RUNTIME_BASE_URL` is unset — the app
-  will fail its first-launch download until a real URL is baked in.
+- `runtime-manifest.json` no longer carries a download URL; the runtime closure
+  ships as a bundled resource, so distributed builds need no public hosting.
 - Release distribution needs code signing / notarization (macOS hardened
   runtime + notarytool, Windows code-signing cert) — out of scope for a local
   build. When a prerelease harness version like `0.1.0-rc.5` is synced, macOS

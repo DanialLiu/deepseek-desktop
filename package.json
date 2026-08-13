@@ -1,6 +1,6 @@
 {
   "name": "deepseek-desktop",
-  "version": "0.1.0",
+  "version": "0.1.0-rc.5",
   "private": true,
   "description": "Cross-platform desktop shell for DeepSeek Harness (Tauri + packaged sidecar)",
   "scripts": {

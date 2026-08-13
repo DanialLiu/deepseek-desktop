@@ -9,7 +9,6 @@ set -e
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 APP="$ROOT/src-tauri/target/release/bundle/macos/DeepSeek Harness.app"
 OUT_DIR="$ROOT/src-tauri/target/release/bundle/dmg"
-OUT="$OUT_DIR/DeepSeek Harness_0.1.0_aarch64.dmg"
 ICON="$ROOT/src-tauri/icons/icon.icns"
 TMP="$OUT_DIR/.staging.dmg"
 
@@ -21,18 +20,29 @@ if [ ! -f "$ICON" ]; then
   echo "make-dmg: $ICON not found; run \`pnpm run icons\` first." >&2
   exit 1
 fi
+
+# Read the version from the built .app (matches tauri.conf.json, which
+# build-sidecar.mjs syncs from the harness) so the DMG filename always tracks
+# the harness version instead of a hardcoded one.
+VERSION="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$APP/Contents/Info.plist")"
+OUT="$OUT_DIR/DeepSeek Harness_${VERSION}_aarch64.dmg"
+
 mkdir -p "$OUT_DIR"
 rm -f "$TMP"
 
-# Bake the volume icon: build a raw (writable) image, mount it, drop a
-# `.VolumeIcon.icns` at the volume root and mark it with SetFile -a C, then
-# convert to the compressed ULFO (lzfse) image. (A plain `hdiutil create
-# -srcfolder` pass does not carry the Finder custom-icon bit over, so Finder
-# would keep showing the generic disk-image icon.)
+# Bake the volume icon and add the standard drag-to-install layout:
+#   - mount the writable image,
+#   - add an "Applications" symlink next to the app (the drop target), then
+#   - drop `.VolumeIcon.icns` at the volume root and mark the volume with
+#     SetFile -a C so Finder shows the custom disk icon, and
+#   - mark the icon file itself hidden so it doesn't clutter the window.
+# A plain `hdiutil create -srcfolder` pass carries none of this over.
 hdiutil create -volname "DeepSeek Harness" -srcfolder "$APP" -ov -format UDRW "$TMP"
 VOL="$(hdiutil attach -nobrowse "$TMP" | tail -1 | awk -F'\t' '{print $NF}')"
+ln -s /Applications "$VOL/Applications"
 cp "$ICON" "$VOL/.VolumeIcon.icns"
 SetFile -a C "$VOL"
+chflags hidden "$VOL/.VolumeIcon.icns"
 hdiutil detach "$VOL"
 # Let the volume fully detach before converting; an immediate convert can race
 # the unmount and fail with "Resource temporarily unavailable".

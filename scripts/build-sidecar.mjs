@@ -5,8 +5,8 @@
  *   - stages the @deepseek-ai/dsh dependency closure into a flat, symlink-free
  *     node_modules tree (the same deploy route the harness SDK runtime uses),
  *   - downloads the official Node binary (no system Node required),
- *   - packages the closure as node-app.tar.gz + a runtime manifest (url/version/
- *     sha256) that the shell downloads on first launch into its data dir, and
+ *   - packages the closure as a single tarball shipped inside the .app
+ *     (bundle.resources) and extracted on first launch — fully offline, and
  *   - syncs the desktop app version (package.json / tauri.conf.json / Cargo.toml)
  *     to the harness @deepseek-ai/dsh version so the bundle never drifts.
  *
@@ -121,7 +121,8 @@ function usage() {
     `Harness checkout: ${HARNESS_ROOT} (override with HARNESS=<path>).`,
     `Output: ${OUT_DIR}/node-<rust-triple> (externalBin) + node-app-<triple>.tar.gz`,
     '        and src-tauri/runtime-manifest.json (first-launch download).',
-    '  RUNTIME_BASE_URL=<url>  download base URL baked into the manifest.',
+    '  RUNTIME_BASE_URL=<url>  optional download URL recorded in the manifest (the',
+    '                          shipped app bundles the closure, so this is unused).',
     '  RUNTIME_VERSION=<v>     runtime version in the manifest (default: harness version).',
     '',
     'The desktop app version is auto-synced from the harness @deepseek-ai/dsh version.',
@@ -497,9 +498,11 @@ async function sha256File(path) {
 
 /**
  * Package the staged closure as `node-app-<triple>.tar.gz` (top-level dir
- * `node-app`, so it extracts to `<runtime>/node-app`) and write the runtime
- * manifest the shell bakes in via include_str!. The download base URL comes
- * from RUNTIME_BASE_URL — set it at release time; a placeholder is used here.
+ * `node-app`, so it extracts to `<runtime>/node-app`), copy it into
+ * `src-tauri/resources/` so Tauri bundles it inside the .app, and write the
+ * runtime manifest (version + sha256) the shell bakes in via include_str!.
+ * An optional `url` is only recorded when RUNTIME_BASE_URL is set (kept for a
+ * future hybrid/update path); the shipped app does not download anything.
  */
 async function packageClosure(target, triple, version) {
   const packRoot = join(OUT_DIR, '.package')
@@ -512,22 +515,19 @@ async function packageClosure(target, triple, version) {
   await run('pack node-app', 'tar', ['-czf', tarball, '-C', packRoot, 'node-app'])
 
   const sha256 = await sha256File(tarball)
+  const manifest = { version: process.env.RUNTIME_VERSION ?? version, sha256 }
   const base = (process.env.RUNTIME_BASE_URL ?? '').replace(/\/+$/, '')
-  if (base === '') {
-    console.warn('build-sidecar: RUNTIME_BASE_URL is not set; manifest.url is a placeholder — set it to your CDN/OSS base at release time.')
-  }
-  const fallbackBase = 'https://runtime.example.invalid/deepseek-desktop'
-  const url = `${base || fallbackBase}/${basename(tarball)}`
-  const manifest = {
-    version: process.env.RUNTIME_VERSION ?? version,
-    url,
-    sha256,
-  }
+  if (base) manifest.url = `${base}/${basename(tarball)}`
   const manifestPath = join(ROOT, 'src-tauri', 'runtime-manifest.json')
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
 
+  // Ship the closure as a bundled resource (single file) rather than a
+  // first-launch download, so the app is fully self-contained and offline.
+  await mkdir(join(ROOT, 'src-tauri', 'resources'), { recursive: true })
+  await cp(tarball, join(ROOT, 'src-tauri', 'resources', 'node-app-runtime.tar.gz'))
+
   console.log(`build-sidecar: packaged ${basename(tarball)} (${((await stat(tarball)).size / 1048576).toFixed(1)} MiB, sha256 ${sha256.slice(0, 12)}…)`)
-  console.log(`build-sidecar: manifest -> ${manifestPath} (url: ${url})`)
+  console.log(`build-sidecar: manifest -> ${manifestPath} (bundled resource${base ? `, url: ${base}/${basename(tarball)}` : ''})`)
 
   await rm(packRoot, { recursive: true, force: true })
   return [tarball, manifestPath]

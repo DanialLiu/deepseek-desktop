@@ -1,21 +1,26 @@
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 /// The manifest written by `scripts/build-sidecar.mjs` and baked in at compile
-/// time. It pins the exact download URL + SHA-256 of the harness closure so the
-/// shell can fetch it on first launch instead of shipping it inside the bundle.
+/// time. It pins the harness runtime version + SHA-256 of the shipped closure
+/// so the shell can verify the bundled tarball before extracting it.
 const MANIFEST_JSON: &str = include_str!("../runtime-manifest.json");
 
 #[derive(Debug, Deserialize)]
 pub struct RuntimeManifest {
     pub version: String,
-    pub url: String,
+    /// Optional download URL. Kept only for a future hybrid/update path; the
+    /// shipped app extracts the bundled resource instead of downloading, so a
+    /// missing `url` is fine.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub url: Option<String>,
     pub sha256: String,
 }
 
@@ -23,7 +28,7 @@ pub struct RuntimeManifest {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeProgress {
-    phase: &'static str, // check | download | extract | ready | error
+    phase: &'static str, // check | extract | ready | error
     message: String,
     percent: Option<u32>,
 }
@@ -56,42 +61,6 @@ fn is_installed(runtime: &Path, manifest: &RuntimeManifest) -> bool {
         && installed_version(runtime).as_deref() == Some(manifest.version.as_str())
 }
 
-/// Stream a URL to `dest`, reporting percent complete (0..=100) via `on_percent`.
-fn download(url: &str, dest: &Path, on_percent: &mut dyn FnMut(u32)) -> Result<(), String> {
-    let agent = ureq::AgentBuilder::new().build();
-    let resp = agent
-        .get(url)
-        .call()
-        .map_err(|e| format!("download failed: {e}"))?;
-    let total = resp.header("Content-Length").and_then(|v| v.parse::<u64>().ok());
-
-    if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
-    }
-    let mut file = File::create(dest).map_err(|e| format!("create file: {e}"))?;
-    let mut reader = resp.into_reader();
-    let mut buf = [0u8; 64 * 1024];
-    let mut downloaded: u64 = 0;
-    let mut last_percent: Option<u32> = None;
-    loop {
-        let n = reader.read(&mut buf).map_err(|e| format!("read: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        file.write_all(&buf[..n]).map_err(|e| format!("write: {e}"))?;
-        downloaded += n as u64;
-        if let Some(total) = total.filter(|t| *t > 0) {
-            let percent = ((downloaded * 100) / total).min(100) as u32;
-            if last_percent != Some(percent) {
-                last_percent = Some(percent);
-                on_percent(percent);
-            }
-        }
-    }
-    file.flush().map_err(|e| format!("flush: {e}"))?;
-    Ok(())
-}
-
 fn sha256_file(path: &Path) -> Result<String, String> {
     let mut file = File::open(path).map_err(|e| format!("open: {e}"))?;
     let mut hasher = Sha256::new();
@@ -114,10 +83,12 @@ fn extract(tarball: &Path, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Ensure the harness closure is present under `<app_data>/runtime/node-app`,
-/// downloading + verifying + extracting it on first launch (or on version bump).
+/// Ensure the harness closure is present under `<app_data>/runtime/node-app`.
 ///
-/// Blocking (network + file I/O); call from `spawn_blocking`.
+/// The closure ships as a single bundled resource (a tarball inside the .app),
+/// so first launch is fully offline: verify the SHA-256, extract to a staging
+/// dir, then atomically swap it into place. Subsequent launches on the same
+/// version are a no-op. Blocking (file I/O); call from `spawn_blocking`.
 pub fn ensure_runtime(
     app_data_dir: &Path,
     manifest: &RuntimeManifest,
@@ -125,26 +96,28 @@ pub fn ensure_runtime(
 ) -> Result<PathBuf, String> {
     let runtime = runtime_dir(app_data_dir);
 
-    if is_installed(&runtime, &manifest) {
+    if is_installed(&runtime, manifest) {
         emit(handle, "ready", "运行时已就绪".to_string(), None);
         return Ok(runtime);
+    }
+
+    // Locate the bundled tarball inside the app's Resources directory.
+    let resource_dir = handle
+        .path()
+        .resource_dir()
+        .map_err(|e| format!("无法定位应用资源目录: {e}"))?;
+    let tarball = resource_dir.join("node-app-runtime.tar.gz");
+    if !tarball.is_file() {
+        return Err(format!("应用资源缺少运行时包: {}", tarball.display()));
     }
 
     fs::create_dir_all(&runtime).map_err(|e| format!("mkdir runtime: {e}"))?;
     let staging = runtime.join(".install");
     let _ = fs::remove_dir_all(&staging);
     fs::create_dir_all(&staging).map_err(|e| format!("mkdir staging: {e}"))?;
-    let tarball = staging.join("node-app.tar.gz");
 
-    emit(handle, "download", "正在下载运行时…".to_string(), Some(0));
-    {
-        let h = handle.clone();
-        let mut on_percent = |percent: u32| {
-            emit(&h, "download", format!("正在下载运行时… {percent}%"), Some(percent));
-        };
-        download(&manifest.url, &tarball, &mut on_percent)?;
-    }
-
+    // Integrity self-check against the compile-time SHA-256.
+    emit(handle, "check", "正在校验运行时…".to_string(), None);
     let actual = sha256_file(&tarball)?;
     if !actual.eq_ignore_ascii_case(&manifest.sha256) {
         let _ = fs::remove_dir_all(&staging);
@@ -179,8 +152,7 @@ pub fn ensure_runtime(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::TcpListener;
-    use std::thread;
+    use std::path::PathBuf;
 
     /// Build a tiny tarball with the same layout the real closure uses
     /// (`node-app/lib/bin.js`), so extract + entry checks are realistic.
@@ -220,39 +192,6 @@ mod tests {
         extract(&tarball, &out).unwrap();
         assert!(out.join("node-app").join("lib").join("bin.js").is_file());
 
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn download_from_local_http_reports_progress() {
-        let dir = temp_dir("download");
-        let tarball = dir.join("node-app.tar.gz");
-        make_tarball(&tarball);
-        let bytes = fs::read(&tarball).unwrap();
-        let server_bytes = bytes.clone();
-
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut req = [0u8; 2048];
-            let _ = stream.read(&mut req);
-            let head = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                server_bytes.len()
-            );
-            let _ = stream.write_all(head.as_bytes());
-            let _ = stream.write_all(&server_bytes);
-        });
-
-        let url = format!("http://{addr}/node-app.tar.gz");
-        let dest = dir.join("dl.tar.gz");
-        let mut last_percent = None;
-        download(&url, &dest, &mut |p| last_percent = Some(p)).unwrap();
-        server.join().unwrap();
-
-        assert_eq!(fs::read(&dest).unwrap(), bytes);
-        assert_eq!(last_percent, Some(100));
         let _ = fs::remove_dir_all(&dir);
     }
 }
