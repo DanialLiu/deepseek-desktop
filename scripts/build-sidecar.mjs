@@ -29,6 +29,13 @@ const OUT_DIR = join(ROOT, 'src-tauri', 'binaries')
 const STAGING = join(OUT_DIR, '.staging')
 const NODE_APP_DIR = join(ROOT, 'src-tauri', 'resources', 'node-app')
 
+// Every recursive `rm()` below passes maxRetries/retryDelay: deleting a
+// closure right after `pnpm deploy` writes it races Windows Defender's
+// real-time scan of the newly created files, which transiently holds an
+// EPERM lock on one of them (observed repeatedly on @aws-sdk/@smithy files
+// specifically). Node's built-in rm retry absorbs that instead of failing
+// the whole build on a single unlucky file.
+
 const DEPLOY_ROOT_PACKAGE = '@deepseek-ai/dsh'
 const NODE_VERSION = 'v24.19.0'
 
@@ -195,13 +202,13 @@ async function materializeStagedLinks() {
     const segments = remaining.slice(nodeModules.length + 1).split(sep)
     const binIndex = segments.lastIndexOf('.bin')
     if (binIndex >= 0) {
-      await rm(join(nodeModules, ...segments.slice(0, binIndex + 1)), { recursive: true, force: true })
+      await rm(join(nodeModules, ...segments.slice(0, binIndex + 1)), { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
       remaining = await findSymlink(nodeModules)
       continue
     }
     const destination = remaining
     const source = await realpath(destination)
-    await rm(destination, { recursive: true, force: true })
+    await rm(destination, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
     await cp(source, destination, { recursive: true, dereference: true })
     remaining = await findSymlink(nodeModules)
   }
@@ -304,7 +311,7 @@ async function completeWorkspaceClosure() {
 }
 
 async function deployStaging(skipBuild) {
-  await rm(STAGING, { recursive: true, force: true })
+  await rm(STAGING, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
   if (!skipBuild) {
     await run('install', pnpmBin(), ['install'])
     await run('build', pnpmBin(), ['run', 'build'])
@@ -462,7 +469,7 @@ async function pruneTargetPrebuilds(root, target) {
   for (const entry of entries) {
     if (entry.name === keep) continue
     pruned += await pathBytes(join(prebuildsRoot, entry.name))
-    await rm(join(prebuildsRoot, entry.name), { recursive: true, force: true })
+    await rm(join(prebuildsRoot, entry.name), { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
   }
   for (const pdb of globSync('**/*.pdb', { cwd: prebuildsRoot, absolute: true })) {
     pruned += await pathBytes(pdb)
@@ -520,7 +527,7 @@ async function sha256File(path) {
  */
 async function packageClosure(target, triple, version) {
   const packRoot = join(OUT_DIR, '.package')
-  await rm(packRoot, { recursive: true, force: true })
+  await rm(packRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
   await mkdir(packRoot, { recursive: true })
   const stagedNodeApp = join(packRoot, 'node-app')
   await rename(STAGING, stagedNodeApp)
@@ -543,7 +550,7 @@ async function packageClosure(target, triple, version) {
   console.log(`build-sidecar: packaged ${basename(tarball)} (${((await stat(tarball)).size / 1048576).toFixed(1)} MiB, sha256 ${sha256.slice(0, 12)}…)`)
   console.log(`build-sidecar: manifest -> ${manifestPath} (bundled resource${base ? `, url: ${base}/${basename(tarball)}` : ''})`)
 
-  await rm(packRoot, { recursive: true, force: true })
+  await rm(packRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
   return [tarball, manifestPath]
 }
 
@@ -570,13 +577,13 @@ async function assemble(target, noStrip, version) {
 
   // 4. Drop the extracted node dist dir; keep the archive as a download cache.
   const nodePlatform = NODE_PLATFORMS[target]
-  await rm(join(OUT_DIR, `node-${NODE_VERSION}-${nodePlatform}`), { recursive: true, force: true })
+  await rm(join(OUT_DIR, `node-${NODE_VERSION}-${nodePlatform}`), { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
 
   // 5. Package the closure for first-launch download + write the manifest.
   const [tarball, manifestPath] = await packageClosure(target, triple, version)
 
   // 6. Remove any stale bundled closure from the pre-external-download layout.
-  await rm(NODE_APP_DIR, { recursive: true, force: true })
+  await rm(NODE_APP_DIR, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
 
   return [dest, tarball, manifestPath]
 }

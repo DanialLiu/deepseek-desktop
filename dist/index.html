@@ -58,11 +58,18 @@
           });
         }
         // Fallback: poll a host command in case the event fired before we loaded.
+        // First launch has to verify + extract a ~30k-file bundled runtime
+        // (slower under antivirus real-time scanning) before the sidecar can
+        // even start, so this has to tolerate minutes, not seconds. Real
+        // bootstrap failures are reported via the 'runtime-progress' error
+        // phase above (which sets `failed` and stops this loop); this timeout
+        // is just a last-resort message if nothing has happened for a very
+        // long time.
         var attempts = 0;
         function poll() {
           if (navigated || failed) return;
           attempts += 1;
-          if (attempts > 120) { status('Could not reach the DeepSeek Harness server.'); return; }
+          if (attempts > 2400) { status('Could not reach the DeepSeek Harness server.'); return; }
           var p = window.__TAURI__ && window.__TAURI__.core
             ? window.__TAURI__.core.invoke('get_sidecar_url')
             : Promise.resolve(null);
