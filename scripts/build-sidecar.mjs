@@ -141,7 +141,15 @@ async function run(label, command, args, cwd = HARNESS_ROOT) {
   const printable = formatCommand(command, args)
   console.log(`build-sidecar: ${label}: ${printable}`)
   await new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, { cwd, stdio: 'inherit', env: { ...process.env, CI: 'true' } })
+    // Windows cannot execute .cmd shims directly through CreateProcess. Node
+    // reports EINVAL for pnpm.cmd unless the command is routed through cmd.exe.
+    const shell = process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(command)
+    const child = spawn(command, args, {
+      cwd,
+      stdio: 'inherit',
+      env: { ...process.env, CI: 'true' },
+      shell,
+    })
     child.once('error', error => {
       reject(new Error(`build-sidecar: ${label} failed to spawn: ${error.message} (${printable})`))
     })
@@ -376,7 +384,11 @@ async function fetchNodeBinary(target) {
   const ext = isWin ? '.zip' : '.tar.gz'
   const archive = join(OUT_DIR, `node-${NODE_VERSION}-${nodePlatform}${ext}`)
   const extractedDir = join(OUT_DIR, `node-${NODE_VERSION}-${nodePlatform}`)
-  const nodeBin = join(extractedDir, 'bin', isWin ? 'node.exe' : 'node')
+  // Official Windows archives place node.exe at the archive root, while the
+  // Unix archives use bin/node.
+  const nodeBin = isWin
+    ? join(extractedDir, 'node.exe')
+    : join(extractedDir, 'bin', 'node')
 
   if (existsSync(nodeBin)) return nodeBin
 
@@ -388,7 +400,9 @@ async function fetchNodeBinary(target) {
     await run(`download node ${nodePlatform}`, 'curl', ['-fsSL', '--retry', '3', '-o', archive, url])
   }
   if (isWin) {
-    await run('extract node (zip)', 'unzip', ['-q', '-o', archive, '-d', OUT_DIR])
+    // bsdtar ships with supported Windows installations and understands zip;
+    // `unzip` is normally absent from Windows PATH.
+    await run('extract node (zip)', 'tar', ['-xf', archive, '-C', OUT_DIR])
   } else {
     await run('extract node (tar)', 'tar', ['-xzf', archive, '-C', OUT_DIR])
   }

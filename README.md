@@ -95,6 +95,8 @@ pnpm run build                             # tauri build → .app / .exe / Linux
 pnpm run make-dmg                          # 仅 macOS：由 .app 制作 .dmg
 ```
 
+Windows 构建会生成明确配置为 `currentUser` 的 x64 NSIS 安装程序，安装到当前用户的 `%LOCALAPPDATA%`，不请求管理员权限。推送 `v*` 标签后，GitHub Actions 会重新构建 Windows x64 并创建 Release。
+
 `pnpm run sidecar`（即 `node scripts/build-sidecar.mjs`）支持覆盖参数：
 
 ```bash
@@ -121,8 +123,8 @@ node scripts/build-sidecar.mjs --targets=macos-arm64
 
 ### 注意事项与限制
 
-- **Windows 暂非目标平台**（Harness 文档把 Windows 列为 deploy/单文件 exe 路由的非目标）。支持 macOS 和 Linux（x64/arm64）。
-- `tauri build` 产出 `.app`（macOS）、`.exe`/`.msi`（Windows）或 `.deb`/`.rpm`/`.AppImage`（Linux）。macOS 的 `.dmg` 由 `pnpm run make-dmg` 制作，因为 Tauri 自带的 `create-dmg` 助手在这个大型应用上会与 Spotlight 竞争、无法卸载其可写卷（"Resource busy"）。
+- Windows x64 使用官方 Node 运行时和原生依赖的 win32-x64 预编译模块，安装包为不需要管理员权限的按用户 NSIS 包。32 位 x86 暂不发布：Node 24 不提供 win-x86 运行时，且 Harness 闭包中的 node-pty、Koffi、Sharp、Ripgrep 和 N-API 模块没有完整的 win32-x86 产物。仅编译 32 位 Tauri 外壳会导致功能缺失，因此不作为可用版本交付。
+- `tauri build` 产出 `.app`（macOS）、NSIS 安装程序（Windows）或 `.deb`/`.rpm`/`.AppImage`（Linux）。macOS 的 `.dmg` 由 `pnpm run make-dmg` 制作，因为 Tauri 自带的 `create-dmg` 助手在这个大型应用上会与 Spotlight 竞争、无法卸载其可写卷（"Resource busy"）。
 - **macOS 26.5.x 坑**：当 `-o` 输出路径含空格时，`hdiutil convert` 会 PAC 崩溃，所以 `make-dmg.sh` 先转换到不含空格的临时名（`.final.dmg`）再重命名；并使用 `-format ULFO`（lzfse），比 `UDZO` 更快更小。
 - DMG 使用标准的「拖拽安装」布局：`make-dmg.sh` 挂载可写暂存镜像，在应用旁添加一个 `Applications -> /Applications` 符号链接。自定义卷图标通过写入 `.VolumeIcon.icns` 并执行 `SetFile -a C` 内置；该文件随后被标记为隐藏（`chflags hidden`），以免弄乱窗口。
 - macOS 上 `node-pty` 需要 `-spawn-helper` 同级文件（terminal/bash 工具用到）。harness 自带的安装会构建它；打包前请确保 `node_modules/node-pty` 已就绪（`pnpm deploy` 的 postinstall 会处理）。
@@ -271,6 +273,10 @@ pnpm run build                             # tauri build → .app / .exe / Linux
 pnpm run make-dmg                          # macOS only: .dmg from the .app
 ```
 
+Windows builds produce an x64 NSIS installer explicitly configured for
+`currentUser`; it installs under `%LOCALAPPDATA%` without elevation. Pushing a
+`v*` tag rebuilds Windows x64 and creates the GitHub release.
+
 `pnpm run sidecar` (i.e. `node scripts/build-sidecar.mjs`) accepts overrides:
 
 ```bash
@@ -302,10 +308,13 @@ Other flags: `--no-strip` (ship the node binary unstripped), `--dry-run`
 
 ## Notes & limitations
 
-- **Windows is not yet a target** for the closure build (the Harness documents
-  Windows as a non-goal for its deploy/single-exe route). macOS and Linux
-  (x64/arm64) are supported.
-- `tauri build` produces the `.app` (macOS), `.exe`/`.msi` (Windows), or
+- Windows x64 uses the official Node runtime and matching native prebuilds. Its
+  NSIS installer is per-user and requires no administrator privileges. A
+  32-bit x86 build is not published: Node 24 has no win-x86 runtime, and the
+  Harness closure's node-pty, Koffi, Sharp, Ripgrep, and N-API dependencies do
+  not provide a complete win32-x86 set. A 32-bit Tauri shell alone would ship
+  broken features and is therefore not treated as a usable build.
+- `tauri build` produces the `.app` (macOS), NSIS installer (Windows), or
   `.deb`/`.rpm`/`.AppImage` (Linux). The macOS `.dmg` is produced by
   `pnpm run make-dmg` because Tauri's bundled `create-dmg` helper races
   Spotlight on this large app and fails to unmount its writable volume
