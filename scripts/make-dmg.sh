@@ -55,4 +55,11 @@ rm -f "$OUT_DIR/.final.dmg"
 hdiutil convert "$TMP" -format ULFO -o "$OUT_DIR/.final.dmg"
 mv -f "$OUT_DIR/.final.dmg" "$OUT"
 rm -f "$TMP"
+
+# Ad-hoc sign the DMG so Gatekeeper sees it as an "unidentified developer"
+# artifact instead of an unsigned one. Unsigned artifacts fail to open with no
+# bypass; an ad-hoc signature lets the user override it from
+# System Settings → Privacy & Security → Open Anyway.
+codesign --force --sign - "$OUT"
+
 echo "Created: $OUT"

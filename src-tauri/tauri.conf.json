@@ -29,6 +29,10 @@
     "targets": [
       "app"
     ],
+    "macOS": {
+      "signingIdentity": "-",
+      "hardenedRuntime": false
+    },
     "category": "DeveloperTool",
     "shortDescription": "DeepSeek Harness desktop",
     "longDescription": "Desktop shell for the DeepSeek Harness coding agent.",
